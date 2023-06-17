@@ -9,8 +9,9 @@ class EmailVerifier::Checker
   # real mail servers got from MX dns lookup
   def initialize(address)
     @email   = address
-    _, @domain  = address.split("@")
-    @servers = list_mxs @domain
+    # _, @domain  = address.split("@")
+    # @servers = list_mxs @domain
+    @servers = list_mxs(address.split("@").last)
     raise EmailVerifier::NoMailServerException.new("No mail server for #{address}") if @servers.empty?
     @smtp    = nil
 
@@ -21,13 +22,17 @@ class EmailVerifier::Checker
   end
 
   def list_mxs(domain)
-    return [] unless domain
-    res = Dnsruby::DNS.new
+    return [] unless domain.present?
     mxs = []
-    res.each_resource(domain, 'MX') do |rr|
+    resolver = Dnsruby::DNS.new
+    resolver.each_resource(domain, 'MX') do |rr|
       mxs << { priority: rr.preference, address: rr.exchange.to_s }
     end
-    mxs.sort_by { |mx| mx[:priority] }
+    if mxs.empty?
+      return [resolver.getresource(domain, 'A').address.to_s]
+    else
+      return mxs.sort_by { |mx| mx[:priority] }
+    end
   rescue Dnsruby::NXDomain
     raise EmailVerifier::NoMailServerException.new("#{domain} does not exist") 
   end
@@ -37,16 +42,27 @@ class EmailVerifier::Checker
   end
 
   def connect
-    begin
+    # begin
+    #   server = next_server
+    #   raise EmailVerifier::OutOfMailServersException.new("Unable to connect to any one of mail servers for #{@email}") if server.nil?
+    #   @smtp = Net::SMTP.start server[:address], 25, @user_domain
+    #   return true
+    # rescue EmailVerifier::OutOfMailServersException => e
+    #   raise EmailVerifier::OutOfMailServersException, e.message
+    # rescue => e
+    #   retry
+    # end
       server = next_server
       raise EmailVerifier::OutOfMailServersException.new("Unable to connect to any one of mail servers for #{@email}") if server.nil?
-      @smtp = Net::SMTP.start server[:address], 25, @user_domain
-      return true
+      @smtp = Net::SMTP.start(server[:address], 25, EmailVerifier.config.verifier_domain)
+      @smtp.open_timeout = 5
+      @smtp.read_timeout = 2
+      @smtp.start(EmailVerifier.config.verifier_domain)
+      true
     rescue EmailVerifier::OutOfMailServersException => e
-      raise EmailVerifier::OutOfMailServersException, e.message
+      raise e
     rescue => e
       retry
-    end
   end
 
   def next_server
@@ -54,7 +70,7 @@ class EmailVerifier::Checker
   end
 
   def verify
-    self.mailfrom @user_email
+    self.mailfrom EmailVerifier.config.verifier_email
     self.rcptto(@email).tap do
       close_connection
     end
